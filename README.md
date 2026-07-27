@@ -10,6 +10,7 @@ Discord plugin that replaces default stream preview with custom images. Features
 - **Multi-select**: Ctrl/Shift+Click images to delete several at once
 - **Local Storage**: Images stored in IndexedDB, no external servers
 - **Panel Button**: Quick access button next to microphone controls (can be hidden in plugin settings)
+- **Hotkey**: `Alt+1` opens and closes the gallery — rebindable in the plugin settings
 
 ## Notes
 - **Your own preview may show your real screen for the first minutes** — that's a local snapshot, it never leaves your PC and disappears after a while. Discord has already accepted your custom image: the plugin replaces the thumbnail uploaded to Discord's servers, so viewers only ever see it.

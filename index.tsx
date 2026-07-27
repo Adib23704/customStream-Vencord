@@ -24,7 +24,7 @@ import { ImageIcon } from "@components/Icons";
 import definePlugin, { OptionType } from "@utils/types";
 import { RenderModalProps } from "@vencord/discord-types";
 import { findComponentByCodeLazy } from "@webpack";
-import { Alerts, Button, Menu, Modal, openModal, React, showToast, Text, Toasts, UserStore, useEffect, useRef, useState } from "@webpack/common";
+import { Alerts, Button, closeModal, Menu, Modal, openModal, React, showToast, Text, Toasts, UserStore, useEffect, useRef, useState } from "@webpack/common";
 
 // Компонент кнопки в панели
 const PanelButton = findComponentByCodeLazy(".GREEN,positionKeyStemOverride:");
@@ -40,6 +40,8 @@ const MAX_IMAGES = 50;
 const MAX_IMAGES_PER_PROFILE = 50;
 const MAX_PROFILES = 5;  // Maximum number of profiles allowed
 const DEFAULT_PROFILE_ID = "default";
+const DEFAULT_HOTKEY = "Alt+1";
+const IMAGE_PICKER_MODAL_KEY = "custom-stream-topq-gallery";
 
 // Структура профиля
 interface Profile {
@@ -120,6 +122,11 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Show the quick access button in the account panel (bottom left). Note: if the button disappeared after a Discord update - it's not this toggle, an update with a fix will be released on GitHub: https://github.com/MrTopQ/customStream-Vencord",
         default: true
+    },
+    hotkey: {
+        type: OptionType.STRING,
+        description: "Hotkey that opens the gallery (e.g. Alt+1, Ctrl+Shift+S)",
+        default: DEFAULT_HOTKEY
     }
 });
 
@@ -2023,8 +2030,114 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
     );
 }
 
+let isPickerOpen = false;
+
 function openImagePicker() {
-    openModal((props: any) => <ImagePickerModal rootProps={props} />);
+    if (isPickerOpen) return; // one gallery at a time, no matter which entry point was used
+
+    isPickerOpen = true;
+    openModal(
+        (props: any) => <ImagePickerModal rootProps={props} />,
+        {
+            modalKey: IMAGE_PICKER_MODAL_KEY,
+            onCloseCallback: () => {
+                isPickerOpen = false;
+            }
+        }
+    );
+}
+
+/** The hotkey opens and closes the gallery. */
+function toggleImagePicker() {
+    if (!isPickerOpen) {
+        openImagePicker();
+        return;
+    }
+
+    closeModal(IMAGE_PICKER_MODAL_KEY);
+    isPickerOpen = false;
+}
+
+// ==================== Хоткей ====================
+
+interface Hotkey {
+    key: string;
+    ctrl: boolean;
+    shift: boolean;
+    alt: boolean;
+    meta: boolean;
+}
+
+function parseHotkey(raw: string | undefined): Hotkey | null {
+    const parts = (raw ?? "").split("+").map(part => part.trim().toLowerCase()).filter(Boolean);
+    if (!parts.length) return null;
+
+    const hotkey: Hotkey = { key: "", ctrl: false, shift: false, alt: false, meta: false };
+
+    for (const part of parts) {
+        if (part === "ctrl" || part === "control") hotkey.ctrl = true;
+        else if (part === "shift") hotkey.shift = true;
+        else if (part === "alt" || part === "option") hotkey.alt = true;
+        else if (part === "meta" || part === "cmd" || part === "win") hotkey.meta = true;
+        else hotkey.key = part;
+    }
+
+    return hotkey.key ? hotkey : null;
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+    const element = target as HTMLElement | null;
+    if (!element?.tagName) return false;
+
+    const tag = element.tagName.toLowerCase();
+    return tag === "input" || tag === "textarea" || element.isContentEditable === true;
+}
+
+function matchesHotkey(event: KeyboardEvent, hotkey: Hotkey): boolean {
+    if (event.ctrlKey !== hotkey.ctrl) return false;
+    if (event.shiftKey !== hotkey.shift) return false;
+    if (event.altKey !== hotkey.alt) return false;
+    if (event.metaKey !== hotkey.meta) return false;
+
+    // Alt+key gives exotic event.key values on some layouts, so the physical code counts too
+    const key = event.key?.toLowerCase() ?? "";
+    const code = event.code?.toLowerCase() ?? "";
+
+    return key === hotkey.key
+        || code === hotkey.key
+        || code === `key${hotkey.key}`
+        || code === `digit${hotkey.key}`
+        || code === `numpad${hotkey.key}`;
+}
+
+let hotkeyHandler: ((event: KeyboardEvent) => void) | null = null;
+
+function registerHotkey() {
+    unregisterHotkey();
+
+    hotkeyHandler = (event: KeyboardEvent) => {
+        if (event.repeat) return;
+
+        const hotkey = parseHotkey(settings.store.hotkey || DEFAULT_HOTKEY);
+        if (!hotkey) return;
+
+        const hasModifier = hotkey.ctrl || hotkey.shift || hotkey.alt || hotkey.meta;
+        if (!hasModifier && isTypingTarget(event.target)) return;
+
+        if (!matchesHotkey(event, hotkey)) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        toggleImagePicker();
+    };
+
+    window.addEventListener("keydown", hotkeyHandler, { capture: true });
+}
+
+function unregisterHotkey() {
+    if (!hotkeyHandler) return;
+    window.removeEventListener("keydown", hotkeyHandler, { capture: true });
+    hotkeyHandler = null;
 }
 
 // Иконка для кнопки панели с бейджем количества
@@ -2406,6 +2519,10 @@ export default definePlugin({
     },
 
     async start() {
+        // Хоткей регистрируем первым: даже если загрузка профилей упадёт, галерея открывается
+        registerHotkey();
+        console.log(`[CustomStreamTopQ] hotkey registered: ${settings.store.hotkey || DEFAULT_HOTKEY}`);
+
         // Загружаем профили при старте (включая миграцию со старого формата)
         await loadProfilesFromDataStore();
 
@@ -2420,6 +2537,8 @@ export default definePlugin({
     },
 
     stop() {
+        unregisterHotkey();
+
         // Очищаем кэш при выключении
         cachedImages = [];
         cachedDataUris = [];
