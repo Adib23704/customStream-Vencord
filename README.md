@@ -12,6 +12,22 @@ Discord plugin that replaces default stream preview with custom images. Features
 - **Panel Button**: Quick access button next to microphone controls (can be hidden in plugin settings)
 - **Hotkey**: `Alt+1` opens and closes the gallery — rebindable in the plugin settings
 
+## Installation
+
+Requires a [Vencord dev install](https://docs.vencord.dev/installing/).
+
+```bash
+git clone https://github.com/MrTopQ/customStream-Vencord src/userplugins/customStream
+```
+
+Then rebuild and reinject:
+
+```bash
+pnpm build && pnpm inject
+```
+
+The plugin is listed as **CustomStreamTopQ** in Vencord settings → Plugins — enable it there.
+
 ## Notes
 - **Your own preview may show your real screen for the first minutes** — that's a local snapshot, it never leaves your PC and disappears after a while. Discord has already accepted your custom image: the plugin replaces the thumbnail uploaded to Discord's servers, so viewers only ever see it.
 - **Panel button disappeared after a Discord update?** The patch broke — a fix will be released here, update the plugin.
