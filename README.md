@@ -14,8 +14,7 @@ Discord plugin that replaces default stream preview with custom images. Features
 
 ## Installation
 
-Requires a [Vencord dev install](https://docs.vencord.dev/installing/) — the git checkout you build
-yourself, not the installer build.
+Requires a [Vencord dev install](https://docs.vencord.dev/installing/)
 
 The plugin lives in `src/userplugins/` inside that checkout, e.g.
 `C:\Vencord\src\userplugins\customStream`. Create the `userplugins` folder if it is not there yet;
