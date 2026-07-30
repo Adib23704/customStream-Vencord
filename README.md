@@ -14,19 +14,28 @@ Discord plugin that replaces default stream preview with custom images. Features
 
 ## Installation
 
-Requires a [Vencord dev install](https://docs.vencord.dev/installing/).
+Requires a [Vencord dev install](https://docs.vencord.dev/installing/) — the git checkout you build
+yourself, not the installer build.
+
+The plugin lives in `src/userplugins/` inside that checkout, e.g.
+`C:\Vencord\src\userplugins\customStream`. Create the `userplugins` folder if it is not there yet;
+its subfolder can be named anything.
+
+From the root of the checkout:
 
 ```bash
 git clone https://github.com/MrTopQ/customStream-Vencord src/userplugins/customStream
 ```
 
-Then rebuild and reinject:
+No git? Download the repository as a ZIP and put this folder in `src/userplugins/` by hand — the
+result is the same. Then, from the root of the checkout:
 
 ```bash
 pnpm build && pnpm inject
 ```
 
-The plugin is listed as **CustomStreamTopQ** in Vencord settings → Plugins — enable it there.
+`pnpm inject` is only needed the first time, when this Vencord is not patched into Discord yet.
+Restart Discord afterwards, then enable **CustomStreamTopQ** in Vencord settings → Plugins.
 
 ## Notes
 - **Your own preview may show your real screen for the first minutes** — that's a local snapshot, it never leaves your PC and disappears after a while. Discord has already accepted your custom image: the plugin replaces the thumbnail uploaded to Discord's servers, so viewers only ever see it.
