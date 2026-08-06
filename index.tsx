@@ -36,8 +36,8 @@ const DATASTORE_KEY_PROFILES = "CustomStreamTopQ_Profiles";
 const DATASTORE_KEY_PROFILES_V2 = "CustomStreamTopQ_ProfilesV2";
 const DATASTORE_KEY_INDICES = "CustomStreamTopQ_SlideIndices";
 const DATASTORE_KEY_ACTIVE_PROFILE = "CustomStreamTopQ_ActiveProfile";
-const MAX_IMAGES = 50;
 const MAX_IMAGES_PER_PROFILE = 50;
+const MAX_FILE_SIZE = 8 * 1024 * 1024;
 const MAX_PROFILES = 5;  // Maximum number of profiles allowed
 const DEFAULT_PROFILE_ID = "default";
 const DEFAULT_HOTKEY = "Alt+1";
@@ -194,25 +194,24 @@ async function migrateFromV1(): Promise<boolean> {
     profiles.clear();
     for (const stored of dataV1.profiles) {
         const blobs: Blob[] = [];
-        const dataUris: string[] = [];
 
         for (const img of stored.images) {
-            const blob = new Blob([new Uint8Array(img.data)], { type: img.type });
-            blobs.push(blob);
-            dataUris.push(await blobToDataUrl(blob));
+            blobs.push(new Blob([new Uint8Array(img.data)], { type: img.type }));
         }
 
         profiles.set(stored.id, {
             id: stored.id,
             name: stored.name,
             images: blobs,
-            dataUris,
+            dataUris: [], // строим лениво, только для активного профиля
             currentIndex: stored.currentIndex
         });
     }
     activeProfileId = dataV1.activeProfileId && profiles.has(dataV1.activeProfileId)
         ? dataV1.activeProfileId
         : DEFAULT_PROFILE_ID;
+
+    await ensureDataUris(getActiveProfile());
 
     // Сохраняем в V2 и удаляем старый ключ
     await saveProfilesToDataStore();
@@ -231,23 +230,20 @@ async function loadProfilesFromDataStore(): Promise<void> {
 
             profiles.clear();
             for (const stored of dataV2.profiles) {
-                const dataUris: string[] = [];
-                for (const blob of stored.images) {
-                    dataUris.push(await blobToDataUrl(blob));
-                }
-
                 const savedIndex = indices[stored.id];
                 profiles.set(stored.id, {
                     id: stored.id,
                     name: stored.name,
                     images: stored.images,
-                    dataUris,
+                    dataUris: [], // строим лениво, только для активного профиля
                     currentIndex: typeof savedIndex === "number" && savedIndex < stored.images.length ? savedIndex : 0
                 });
             }
             activeProfileId = storedActiveId && profiles.has(storedActiveId)
                 ? storedActiveId
                 : DEFAULT_PROFILE_ID;
+
+            await ensureDataUris(getActiveProfile());
         } else if (await migrateFromV1()) {
             // Мигрировали с V1 (картинки хранились как массивы байт) - всё уже загружено
         } else {
@@ -331,8 +327,7 @@ function deleteProfile(profileId: string): boolean {
 
     profiles.delete(profileId);
     if (activeProfileId === profileId) {
-        activeProfileId = DEFAULT_PROFILE_ID;
-        syncCacheWithActiveProfile();
+        void setActiveProfile(DEFAULT_PROFILE_ID);
     }
     return true;
 }
@@ -344,11 +339,17 @@ function renameProfile(profileId: string, newName: string): boolean {
     return true;
 }
 
-function setActiveProfile(profileId: string): boolean {
-    if (!profiles.has(profileId)) return false;
+async function setActiveProfile(profileId: string): Promise<boolean> {
+    const profile = profiles.get(profileId);
+    if (!profile) return false;
+
     activeProfileId = profileId;
-    shuffleBag = []; // Новый профиль - новый цикл случайного порядка
+    resetShuffleBag(); // Новый профиль - новый цикл случайного порядка
     DataStore.set(DATASTORE_KEY_ACTIVE_PROFILE, profileId); // Фоново, без ожидания
+
+    // Профиль мог лежать в памяти без base64, стриму они нужны прямо сейчас
+    await ensureDataUris(profile);
+
     syncCacheWithActiveProfile();
     notifyImageChange();
     return true;
@@ -377,27 +378,31 @@ async function loadSlideIndex(): Promise<number> {
     return typeof index === "number" ? index : 0;
 }
 
-async function saveImagesToDataStore(blobs: Blob[]): Promise<void> {
-    const profile = getActiveProfile();
-    profile.images = blobs;
+// loadImagesFromDataStore удалена - теперь используется getActiveProfile().images напрямую
 
-    // Обновляем dataUris
-    profile.dataUris = [];
-    for (const blob of blobs) {
-        profile.dataUris.push(await blobToDataUrl(blob));
-    }
-
-    syncCacheWithActiveProfile();
-    await saveProfilesToDataStore();
+// Список картинок изменился - старая очередь random-режима ссылается на съехавшие индексы
+function resetShuffleBag(): void {
+    shuffleBag = [];
 }
 
-// loadImagesFromDataStore удалена - теперь используется getActiveProfile().images напрямую
+// data URI нужны только активному профилю (getCustomThumbnail работает синхронно и ждать не может).
+// Остальные профили держат в памяти только Blob, base64 для них не строится
+async function ensureDataUris(profile: Profile): Promise<void> {
+    if (profile.dataUris.length === profile.images.length) return;
+
+    const uris: string[] = [];
+    for (const blob of profile.images) {
+        uris.push(await blobToDataUrl(blob));
+    }
+    profile.dataUris = uris;
+}
 
 async function deleteAllImages(): Promise<void> {
     const profile = getActiveProfile();
     profile.images = [];
     profile.dataUris = [];
     profile.currentIndex = 0;
+    resetShuffleBag();
     syncCacheWithActiveProfile();
     await saveProfilesToDataStore();
 }
@@ -413,6 +418,7 @@ async function deleteImageAtIndex(index: number): Promise<void> {
         profile.currentIndex = 0;
     }
 
+    resetShuffleBag();
     syncCacheWithActiveProfile();
     await saveProfilesToDataStore();
 }
@@ -434,6 +440,7 @@ async function deleteImagesAtIndices(indices: number[]): Promise<void> {
         profile.currentIndex = 0;
     }
 
+    resetShuffleBag();
     syncCacheWithActiveProfile();
     await saveProfilesToDataStore();
 }
@@ -455,14 +462,23 @@ async function moveImage(fromIndex: number, toIndex: number): Promise<void> {
         profile.currentIndex = fromIndex;
     }
 
+    resetShuffleBag();
     syncCacheWithActiveProfile();
     await saveProfilesToDataStore();
 }
 
-async function addImage(blob: Blob): Promise<void> {
+// Пишем в IndexedDB один раз на всю пачку: saveProfilesToDataStore перезаписывает
+// все профили целиком, поэтому сохранение на каждый файл било по диску на ровном месте
+async function addImages(blobs: Blob[]): Promise<void> {
+    if (blobs.length === 0) return;
+
     const profile = getActiveProfile();
-    profile.images.push(blob);
-    profile.dataUris.push(await blobToDataUrl(blob));
+    for (const blob of blobs) {
+        profile.images.push(blob);
+        profile.dataUris.push(await blobToDataUrl(blob));
+    }
+
+    resetShuffleBag();
     syncCacheWithActiveProfile();
     await saveProfilesToDataStore();
 }
@@ -557,7 +573,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
     const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
     const [timerSeconds, setTimerSeconds] = useState(0);
     const [streamActive, setStreamActive] = useState(isStreamActive);
-    const [previewImage, setPreviewImage] = useState<string | null>(null); // Для полноэкранного просмотра
+    const [previewIndex, setPreviewIndex] = useState<number | null>(null); // Полноэкранный просмотр
     const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set()); // Мультивыделение (Ctrl/Shift+клик)
     const lastClickedIndexRef = useRef(0); // Якорь для Shift-диапазона
 
@@ -580,28 +596,19 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                 settings.store.slideshowRandom = init.slideshowRandom;
                 currentSlideIndex = init.slideIndex;
                 // Откатываем активный профиль
-                setActiveProfile(init.activeProfileId);
+                void setActiveProfile(init.activeProfileId);
             }
         };
     }, []);
 
-    const loadImages = async () => {
-        setIsLoading(true);
+    // Сетка живёт на blob-ссылках, а не на base64: data URI раздувает картинку примерно на треть
+    // и держал бы в памяти вторую копию всего профиля поверх самих Blob
+    const loadImages = () => {
         const profile = profiles.get(currentProfileId) || getActiveProfile();
-        const uris: string[] = [];
-        const sizes: number[] = [];
-        for (const blob of profile.images) {
-            try {
-                const uri = await blobToDataUrl(blob);
-                uris.push(uri);
-                sizes.push(blob.size); // Сохраняем размер в байтах
-            } catch (e) {
-                console.error("[CustomStreamTopQ] Error:", e);
-            }
-        }
-        setImages(uris);
+
+        setImages(profile.images.map(blob => URL.createObjectURL(blob)));
+        setImageSizes(profile.images.map(blob => blob.size));
         setPendingIndex(profile.currentIndex);
-        setImageSizes(sizes);
         setSelectedIndices(new Set()); // Список изменился - старое выделение невалидно
         setIsLoading(false);
     };
@@ -609,6 +616,40 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
     useEffect(() => {
         loadImages();
     }, [currentProfileId]);
+
+    // Отзываем ссылки предыдущего набора, иначе Blob висят в памяти до перезапуска Discord
+    useEffect(() => {
+        return () => {
+            images.forEach(url => URL.revokeObjectURL(url));
+        };
+    }, [images]);
+
+    // Лайтбокс гасит Escape у себя: без этого клавиша доходит до модалки Discord,
+    // закрывает всю галерею и откатывает несохранённые переключатели
+    useEffect(() => {
+        if (previewIndex === null) return;
+
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key !== "Escape" && e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+
+            e.preventDefault();
+            e.stopImmediatePropagation();
+
+            if (e.key === "Escape") {
+                setPreviewIndex(null);
+                return;
+            }
+
+            const step = e.key === "ArrowRight" ? 1 : -1;
+            setPreviewIndex(current => {
+                if (current === null || images.length === 0) return current;
+                return (current + step + images.length) % images.length;
+            });
+        };
+
+        window.addEventListener("keydown", onKeyDown, { capture: true });
+        return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+    }, [previewIndex, images.length]);
 
     // Таймер для обновления времени в модалке
     useEffect(() => {
@@ -627,7 +668,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
 
     // Переключение профиля
     const handleProfileSwitch = async (profileId: string) => {
-        setActiveProfile(profileId);
+        await setActiveProfile(profileId);
         setCurrentProfileId(profileId);
         const profile = profiles.get(profileId);
         if (profile) {
@@ -712,8 +753,8 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
         showToast("Profile renamed", Toasts.Type.SUCCESS);
     };
 
-    // Обработка перетаскиваемых файлов
-    const handleDroppedFiles = async (files: FileList | File[]) => {
+    // Один путь импорта для перетаскивания, Ctrl+V и диалога выбора файлов
+    const importFiles = async (files: FileList | File[]) => {
         const profile = profiles.get(currentProfileId) || getActiveProfile();
         const remaining = MAX_IMAGES_PER_PROFILE - profile.images.length;
         if (remaining <= 0) {
@@ -725,27 +766,24 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
         setError("");
 
         try {
-            let added = 0;
+            const processed: Blob[] = [];
             for (const file of files) {
-                if (added >= remaining) {
-                    setError(`Added ${added}. Limit of ${MAX_IMAGES} reached!`);
+                if (processed.length >= remaining) {
+                    setError(`Added ${processed.length}. Limit of ${MAX_IMAGES_PER_PROFILE} reached!`);
                     break;
                 }
-                if (!file.type.startsWith("image/") || file.type === "image/gif") {
-                    continue;
-                }
-                if (file.size > 8 * 1024 * 1024) {
-                    continue;
-                }
+                if (!file.type.startsWith("image/") || file.type === "image/gif") continue;
+                if (file.size > MAX_FILE_SIZE) continue;
 
-                const processedBlob = await processImage(file);
-                await addImage(processedBlob);
-                added++;
+                processed.push(await processImage(file));
             }
 
-            await loadImages();
-            if (added > 0) {
-                showToast(`Added: ${added}`, Toasts.Type.SUCCESS);
+            // Одна запись в IndexedDB на всю пачку вместо записи на каждый файл
+            await addImages(processed);
+            loadImages();
+
+            if (processed.length > 0) {
+                showToast(`Added: ${processed.length}`, Toasts.Type.SUCCESS);
             }
         } catch {
             setError("File processing error");
@@ -774,7 +812,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
 
             if (files.length > 0) {
                 e.preventDefault();
-                handleDroppedFiles(files);
+                importFiles(files);
             }
         };
 
@@ -810,7 +848,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
 
         const files = e.dataTransfer.files;
         if (files.length > 0) {
-            await handleDroppedFiles(files);
+            await importFiles(files);
         }
     };
 
@@ -819,49 +857,9 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
         input.type = "file";
         input.accept = "image/png,image/jpeg,image/webp";
         input.multiple = multiple;
-        input.onchange = async (e: any) => {
+        input.onchange = (e: any) => {
             const files = e.target.files;
-            if (!files?.length) return;
-
-            // Проверяем лимит для текущего профиля
-            const profile = profiles.get(currentProfileId) || getActiveProfile();
-            const remaining = MAX_IMAGES_PER_PROFILE - profile.images.length;
-            if (remaining <= 0) {
-                setError(`Limit of ${MAX_IMAGES_PER_PROFILE} images reached!`);
-                return;
-            }
-
-            setIsLoading(true);
-            setError("");
-
-            try {
-                let added = 0;
-                for (const file of files) {
-                    if (added >= remaining) {
-                        setError(`Added ${added}. Limit of ${MAX_IMAGES_PER_PROFILE} reached!`);
-                        break;
-                    }
-                    if (file.type === "image/gif" || file.type.startsWith("video/")) {
-                        continue;
-                    }
-                    if (file.size > 8 * 1024 * 1024) {
-                        continue;
-                    }
-
-                    const processedBlob = await processImage(file);
-                    await addImage(processedBlob);
-                    added++;
-                }
-
-                await loadImages();
-                if (added > 0) {
-                    showToast(`Added: ${added}`, Toasts.Type.SUCCESS);
-                }
-            } catch {
-                setError("File processing error");
-            }
-
-            setIsLoading(false);
+            if (files?.length) importFiles(files);
         };
         input.click();
     };
@@ -874,7 +872,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
         } else if (profile.images.length === 0) {
             setPendingIndex(0);
         }
-        await loadImages();
+        loadImages();
         setProfileList(getProfileList()); // Обновляем список профилей для отображения количества
         showToast("Deleted", Toasts.Type.MESSAGE);
     };
@@ -946,7 +944,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                 if (pendingIndex >= profile.images.length) {
                     setPendingIndex(Math.max(0, profile.images.length - 1));
                 }
-                await loadImages();
+                loadImages();
                 setProfileList(getProfileList());
                 showToast(`Deleted: ${count}`, Toasts.Type.MESSAGE);
             }
@@ -1026,7 +1024,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
 
             await moveImage(draggedIndex, toIndex);
             setPendingIndex(newPendingIndex);
-            await loadImages();
+            loadImages();
             showToast(`Swapped: #${draggedIndex + 1} ⇄ #${toIndex + 1}`, Toasts.Type.SUCCESS);
         }
 
@@ -1072,9 +1070,9 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
             ]}
         >
             {/* Полноэкранный просмотр изображения */}
-            {previewImage && (
+            {previewIndex !== null && images[previewIndex] && (
                 <div
-                    onClick={() => setPreviewImage(null)}
+                    onClick={() => setPreviewIndex(null)}
                     style={{
                         position: "fixed",
                         top: 0,
@@ -1091,8 +1089,8 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                     }}
                 >
                     <img
-                        src={previewImage}
-                        alt="Preview"
+                        src={images[previewIndex]}
+                        alt={`Slide ${previewIndex + 1}`}
                         style={{
                             maxWidth: "100%",
                             maxHeight: "100%",
@@ -1109,7 +1107,20 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                         fontSize: "14px",
                         opacity: 0.7
                     }}>
-                        Click to close
+                        Esc or click to close
+                    </div>
+                    <div style={{
+                        position: "absolute",
+                        top: "20px",
+                        left: "20px",
+                        color: "white",
+                        fontSize: "14px",
+                        fontWeight: "600",
+                        backgroundColor: "rgba(0,0,0,0.6)",
+                        padding: "6px 12px",
+                        borderRadius: "8px"
+                    }}>
+                        #{previewIndex + 1} / {images.length}
                     </div>
                     <div style={{
                         position: "absolute",
@@ -1122,7 +1133,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                         padding: "8px 16px",
                         borderRadius: "8px"
                     }}>
-                        📐 1280×720 (16:9) - Stream preview size
+                        1280×720 (16:9) Stream preview size {images.length > 1 && "• ← → to browse"}
                     </div>
                 </div>
             )}
@@ -1212,7 +1223,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                         }}>
                             <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                                 <span style={{ fontSize: "20px" }}>📁</span>
-                                <Text variant="text-md/semibold" style={{ color: "#ffffff" }}>
+                                <Text variant="text-md/semibold" style={{ color: "var(--header-primary)" }}>
                                     Profiles
                                 </Text>
                                 <span style={{
@@ -1288,7 +1299,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                         borderRadius: "6px",
                                         border: "1px solid var(--background-modifier-accent)",
                                         backgroundColor: "var(--background-secondary)",
-                                        color: "#ffffff",
+                                        color: "var(--text-normal)",
                                         fontSize: "14px",
                                         outline: "none"
                                     }}
@@ -1352,10 +1363,11 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                             backgroundColor: isActive 
                                                 ? "#5865F2"
                                                 : "var(--background-secondary-alt)",
-                                            background: isActive 
-                                                ? "linear-gradient(135deg, #5865F2 0%, #4752c4 100%)" 
+                                            background: isActive
+                                                ? "linear-gradient(135deg, #5865F2 0%, #4752c4 100%)"
                                                 : "var(--background-secondary-alt)",
-                                            color: "#ffffff",
+                                            // Белым можно писать только поверх синей заливки активной вкладки
+                                            color: isActive ? "#ffffff" : "var(--text-normal)",
                                             cursor: "pointer",
                                             transition: "all 0.2s ease",
                                             border: isActive 
@@ -1400,7 +1412,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                                     borderRadius: "4px",
                                                     border: "2px solid #5865F2",
                                                     backgroundColor: "var(--background-secondary)",
-                                                    color: "#ffffff",
+                                                    color: "var(--text-normal)",
                                                     fontSize: "12px",
                                                     fontWeight: "600",
                                                     outline: "none"
@@ -1419,11 +1431,11 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                                 {!isActive && (
                                                     <span style={{ fontSize: "12px" }}>📁</span>
                                                 )}
-                                                <span style={{ 
-                                                    fontWeight: "600", 
+                                                <span style={{
+                                                    fontWeight: "600",
                                                     fontSize: "12px",
                                                     letterSpacing: "0.2px",
-                                                    color: "#ffffff"
+                                                    color: isActive ? "#ffffff" : "var(--text-normal)"
                                                 }}>
                                                     {profile.name}
                                                 </span>
@@ -1474,7 +1486,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                                         transition: "all 0.15s ease"
                                                     }}
                                                     onMouseEnter={e => (e.currentTarget as HTMLElement).style.backgroundColor = "rgba(255,255,255,0.3)"}
-                                                    onMouseLeave={e => (e.currentTarget as HTMLElement).style.backgroundColor = "rgba(255,255,255,0.15)"}
+                                                    onMouseLeave={e => (e.currentTarget as HTMLElement).style.backgroundColor = "rgba(255,255,255,0.2)"}
                                                     title="Rename"
                                                 >
                                                     ✏️
@@ -1875,7 +1887,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                             <button
                                                 onClick={(e) => {
                                                     e.stopPropagation();
-                                                    setPreviewImage(src);
+                                                    setPreviewIndex(index);
                                                 }}
                                                 style={{
                                                     backgroundColor: "rgba(0,0,0,0.75)",

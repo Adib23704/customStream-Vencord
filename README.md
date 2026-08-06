@@ -8,6 +8,7 @@ Discord plugin that replaces default stream preview with custom images. Features
 - **Sequential/Random**: Random uses a shuffle — no repeats until all images are shown
 - **Ctrl+V**: Paste images from clipboard
 - **Multi-select**: Ctrl/Shift+Click images to delete several at once
+- **Fullscreen preview**: Esc or click closes it, arrow keys browse the profile
 - **Local Storage**: Images stored in IndexedDB, no external servers
 - **Panel Button**: Quick access button next to microphone controls (can be hidden in plugin settings)
 - **Hotkey**: `Alt+1` opens and closes the gallery — rebindable in the plugin settings
