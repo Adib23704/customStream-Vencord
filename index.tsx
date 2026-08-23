@@ -549,8 +549,6 @@ async function processImage(blob: Blob): Promise<Blob> {
     });
 }
 
-// Тик раз в секунду держим в отдельном компоненте: в модалке он перерисовывал
-// всё окно вместе с сеткой на полсотни плиток
 function SlideElapsed() {
     const [seconds, setSeconds] = useState(() => Math.floor((Date.now() - lastSlideChangeTime) / 1000));
 
@@ -628,7 +626,6 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
         setIsLoading(false);
     };
 
-    // Точечное обновление сетки после удаления: URL уцелевших картинок не пересоздаются
     const dropFromGrid = (keep: (index: number) => boolean) => {
         const profile = profiles.get(currentProfileId) || getActiveProfile();
         setImages(prev => prev.filter((_, i) => keep(i)));
@@ -641,8 +638,6 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
         loadImages();
     }, [currentProfileId]);
 
-    // Отзываем только пропавшие ссылки. Удаление и перестановка переиспользуют URL уцелевших
-    // картинок, поэтому браузер не декодирует заново всю сетку после каждого действия
     useEffect(() => {
         const alive = new Set(images);
         for (const url of liveUrlsRef.current) {
