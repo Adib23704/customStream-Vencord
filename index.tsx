@@ -549,6 +549,21 @@ async function processImage(blob: Blob): Promise<Blob> {
     });
 }
 
+// Тик раз в секунду держим в отдельном компоненте: в модалке он перерисовывал
+// всё окно вместе с сеткой на полсотни плиток
+function SlideElapsed() {
+    const [seconds, setSeconds] = useState(() => Math.floor((Date.now() - lastSlideChangeTime) / 1000));
+
+    useEffect(() => {
+        const id = setInterval(() => {
+            if (lastSlideChangeTime > 0) setSeconds(Math.floor((Date.now() - lastSlideChangeTime) / 1000));
+        }, 1000);
+        return () => clearInterval(id);
+    }, []);
+
+    return <>{formatTime(seconds)}</>;
+}
+
 function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
     // Сохраняем исходные значения для отката
     const initialSettingsRef = useRef({
@@ -571,11 +586,11 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
     const [isDragging, setIsDragging] = useState(false);
     const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
     const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
-    const [timerSeconds, setTimerSeconds] = useState(0);
     const [streamActive, setStreamActive] = useState(isStreamActive);
     const [previewIndex, setPreviewIndex] = useState<number | null>(null); // Полноэкранный просмотр
     const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set()); // Мультивыделение (Ctrl/Shift+клик)
     const lastClickedIndexRef = useRef(0); // Якорь для Shift-диапазона
+    const liveUrlsRef = useRef<string[]>([]);
 
     // Состояния для профилей
     const [profileList, setProfileList] = useState<Profile[]>(getProfileList());
@@ -613,16 +628,32 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
         setIsLoading(false);
     };
 
+    // Точечное обновление сетки после удаления: URL уцелевших картинок не пересоздаются
+    const dropFromGrid = (keep: (index: number) => boolean) => {
+        const profile = profiles.get(currentProfileId) || getActiveProfile();
+        setImages(prev => prev.filter((_, i) => keep(i)));
+        setImageSizes(prev => prev.filter((_, i) => keep(i)));
+        setPendingIndex(profile.currentIndex);
+        setSelectedIndices(new Set());
+    };
+
     useEffect(() => {
         loadImages();
     }, [currentProfileId]);
 
-    // Отзываем ссылки предыдущего набора, иначе Blob висят в памяти до перезапуска Discord
+    // Отзываем только пропавшие ссылки. Удаление и перестановка переиспользуют URL уцелевших
+    // картинок, поэтому браузер не декодирует заново всю сетку после каждого действия
     useEffect(() => {
-        return () => {
-            images.forEach(url => URL.revokeObjectURL(url));
-        };
+        const alive = new Set(images);
+        for (const url of liveUrlsRef.current) {
+            if (!alive.has(url)) URL.revokeObjectURL(url);
+        }
+        liveUrlsRef.current = images;
     }, [images]);
+
+    useEffect(() => () => {
+        for (const url of liveUrlsRef.current) URL.revokeObjectURL(url);
+    }, []);
 
     // Лайтбокс гасит Escape у себя: без этого клавиша доходит до модалки Discord,
     // закрывает всю галерею и откатывает несохранённые переключатели
@@ -659,9 +690,6 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                 isStreamActive = false;
             }
             setStreamActive(isStreamActive);
-            if (lastSlideChangeTime > 0 && isStreamActive) {
-                setTimerSeconds(Math.floor((Date.now() - lastSlideChangeTime) / 1000));
-            }
         }, 1000);
         return () => clearInterval(timerInterval);
     }, []);
@@ -872,7 +900,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
         } else if (profile.images.length === 0) {
             setPendingIndex(0);
         }
-        loadImages();
+        dropFromGrid(i => i !== index);
         setProfileList(getProfileList()); // Обновляем список профилей для отображения количества
         showToast("Deleted", Toasts.Type.MESSAGE);
     };
@@ -944,7 +972,8 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                 if (pendingIndex >= profile.images.length) {
                     setPendingIndex(Math.max(0, profile.images.length - 1));
                 }
-                loadImages();
+                const removed = new Set(selectedIndices);
+                dropFromGrid(i => !removed.has(i));
                 setProfileList(getProfileList());
                 showToast(`Deleted: ${count}`, Toasts.Type.MESSAGE);
             }
@@ -1004,9 +1033,9 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
         }
     };
 
-    const handleImageDragLeave = (e: React.DragEvent) => {
+    const handleImageDragLeave = (e: React.DragEvent, index: number) => {
         e.stopPropagation();
-        setDragOverIndex(null);
+        setDragOverIndex(current => (current === index ? null : current));
     };
 
     const handleImageDrop = async (e: React.DragEvent, toIndex: number) => {
@@ -1023,9 +1052,17 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
             }
 
             await moveImage(draggedIndex, toIndex);
+            const from = draggedIndex;
+            const swap = (prev: any[]) => {
+                const next = [...prev];
+                [next[from], next[toIndex]] = [next[toIndex], next[from]];
+                return next;
+            };
+            setImages(swap);
+            setImageSizes(swap);
             setPendingIndex(newPendingIndex);
-            loadImages();
-            showToast(`Swapped: #${draggedIndex + 1} ⇄ #${toIndex + 1}`, Toasts.Type.SUCCESS);
+            setSelectedIndices(new Set());
+            showToast(`Swapped: #${from + 1} ⇄ #${toIndex + 1}`, Toasts.Type.SUCCESS);
         }
 
         setDraggedIndex(null);
@@ -1698,7 +1735,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                         <span style={{ fontSize: "11px", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Timer</span>
                                         <div style={{ display: "flex", alignItems: "baseline", gap: "4px" }}>
                                             <span style={{ fontSize: "14px", fontWeight: "700", color: "#5865F2" }}>
-                                                {formatTime(timerSeconds)}
+                                                <SlideElapsed />
                                             </span>
                                             <span style={{ fontSize: "12px", fontWeight: "500", color: "var(--text-muted)" }}>
                                                 / ~5 min
@@ -1782,7 +1819,7 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                         onClick={e => handleImageClick(e, index)}
                                         onDragStart={(e) => handleImageDragStart(e, index)}
                                         onDragOver={(e) => handleImageDragOver(e, index)}
-                                        onDragLeave={handleImageDragLeave}
+                                        onDragLeave={e => handleImageDragLeave(e, index)}
                                         onDrop={(e) => handleImageDrop(e, index)}
                                         onDragEnd={handleImageDragEnd}
                                         style={{
@@ -1810,7 +1847,9 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                                             : "0 2px 8px rgba(0,0,0,0.2)",
                                             cursor: "grab",
                                             opacity: isBeingDragged ? 0.5 : 1,
-                                            transition: "all 0.15s ease"
+                                            transition: "transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease",
+                                            contentVisibility: "auto",
+                                            containIntrinsicSize: "auto 160px auto 96px"
                                         }}
                                         onMouseEnter={e => {
                                             if (!isCurrent && !isBeingDragged) {
@@ -1835,6 +1874,9 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                             <img
                                                 src={src}
                                                 alt={`Slide ${index + 1}`}
+                                                loading="lazy"
+                                                decoding="async"
+                                                draggable={false}
                                                 style={{
                                                     position: "absolute",
                                                     top: 0,
@@ -1864,7 +1906,6 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                             borderRadius: "6px",
                                             fontSize: "12px",
                                             fontWeight: "600",
-                                            backdropFilter: "blur(4px)",
                                             display: "flex",
                                             alignItems: "center",
                                             gap: "4px"
@@ -1901,7 +1942,6 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                                     display: "flex",
                                                     alignItems: "center",
                                                     justifyContent: "center",
-                                                    backdropFilter: "blur(4px)",
                                                     transition: "background-color 0.15s"
                                                 }}
                                                 onMouseEnter={e => (e.currentTarget as HTMLElement).style.backgroundColor = "rgba(88, 101, 242, 0.9)"}
@@ -1931,7 +1971,6 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                                     display: "flex",
                                                     alignItems: "center",
                                                     justifyContent: "center",
-                                                    backdropFilter: "blur(4px)",
                                                     transition: "background-color 0.15s"
                                                 }}
                                                 onMouseEnter={e => (e.currentTarget as HTMLElement).style.backgroundColor = "rgba(88, 101, 242, 0.9)"}
@@ -1958,7 +1997,6 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                                     display: "flex",
                                                     alignItems: "center",
                                                     justifyContent: "center",
-                                                    backdropFilter: "blur(4px)",
                                                     transition: "background-color 0.15s"
                                                 }}
                                                 onMouseEnter={e => (e.currentTarget as HTMLElement).style.backgroundColor = "rgba(237, 66, 69, 0.9)"}
@@ -1994,7 +2032,6 @@ function ImagePickerModal({ rootProps }: { rootProps: RenderModalProps; }) {
                                                 borderRadius: "4px",
                                                 fontSize: "11px",
                                                 fontWeight: "500",
-                                                backdropFilter: "blur(4px)",
                                                 whiteSpace: "nowrap"
                                             }}>
                                                 📦 {formatFileSize(imageSizes[index])}
